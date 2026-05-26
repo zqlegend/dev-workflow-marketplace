@@ -233,15 +233,20 @@ unavailable — decided at implementation; no shell YAML parsing anywhere).
      This token **already exists** in CYCAS's prompt; the drivers substitute it
      (CYCAS does this via `awk`).
   2. `{{REVIEW_DIR}}` → `.claude/dev-review`. This token does **NOT** exist in
-     CYCAS's prompt — CYCAS hardcodes the literal string `.claude/cycas-review/`
+     CYCAS's prompt — CYCAS hardcodes the literal string `.claude/cycas-review`
      in ~8 places (manifest path, `iteration-M.md`, `latest.md` symlink,
      `convergence-report.md`, `findings-index.md`). The port is a two-step
-     operation: (a) copy the file, then (b) find-replace every literal
-     `.claude/cycas-review/` → `{{REVIEW_DIR}}` to *inject* the placeholder.
-     The drivers then substitute `{{REVIEW_DIR}}` → `.claude/dev-review` at
-     render time (same `awk`/`sed` pass as `{{CHECK_APPROVE_PATH}}`). Skipping
-     step (b) would leave the loop reading/writing the wrong directory and
-     silently break it.
+     operation: (a) copy the file, then (b) find-replace the literal
+     `.claude/cycas-review` — **without** trailing slash — → `{{REVIEW_DIR}}`,
+     so the prompt's existing path slashes are preserved and paths render as
+     `{{REVIEW_DIR}}/manifest.json`. Skipping step (b) leaves the loop
+     reading/writing the wrong directory and silently breaks it.
+     The drivers then substitute BOTH tokens in one pass, e.g.:
+     `awk -v chk="$CHECK_APPROVE" -v rdir='.claude/dev-review' '{gsub(/\{\{CHECK_APPROVE_PATH\}\}/,chk); gsub(/\{\{REVIEW_DIR\}\}/,rdir); print}'`
+     (`rdir` has no trailing slash, matching the stripped literal). Substituting
+     only `{{CHECK_APPROVE_PATH}}` — by copying CYCAS's single-variable `awk`
+     line verbatim — would leave `{{REVIEW_DIR}}` unresolved; the second `gsub`
+     is mandatory.
   The completion-promise tag `<promise>CYCAS-REVIEW-DONE</promise>` →
   `<promise>DEV-REVIEW-DONE</promise>`. The stuck-exit artifact is written to
   `{{REVIEW_DIR}}/convergence-report.md`.
@@ -285,8 +290,12 @@ is **static, at loop-setup time** (not dynamic inside the prompt): each
 `run-*-loop.sh` driver invokes `resolve-roles.py` once after the manifest is
 built. `resolve-roles.py`:
 1. Reads `review.use_external_agents` from config and detects whether
-   `pr-review-toolkit` is installed (probe `installed_plugins.json` / the
-   plugin cache).
+   `pr-review-toolkit` is installed by probing the plugins registry at
+   `<plugins-root>/installed_plugins.json` (the `<plugins-root>` is the
+   grandparent of the cache root located by `find-ralph.sh`; the same
+   directory holds `known_marketplaces.json`) for a `pr-review-toolkit@*` key.
+   If the registry path or key can't be resolved, it conservatively falls back
+   to plugin-owned reviewers. Exact path confirmed at WU2 implementation.
 2. **Rewrites the manifest `roles` arrays in place**, replacing each abstract
    role with a concrete `subagent_type` string the Agent tool accepts.
 3. The prompt then reads already-concrete names and dispatches them verbatim.
@@ -350,8 +359,10 @@ plan-review and code-review loops, but routes differently by mode:
   `wu_status.md`; roles `[structural-architect, process-auditor]`.
 - **Per-WU slices** (`id: wu{N}`): for each Work Unit, the script calls
   `route-change.sh --no-cross-cut` on that WU's declared target file list and
-  takes **only ROLE1** (the single-domain change-shape match); ROLE2 is
-  **always** `process-auditor`. The router's own ROLE2 is intentionally
+  takes **only ROLE1** as-is from the router (e.g. `test-reviewer` for a
+  test-only WU, `correctness-reviewer` for general code); ROLE2 is **always**
+  hardcoded to `process-auditor` regardless of what the router returns as its
+  own ROLE2. The router's own ROLE2 is intentionally
   discarded here — `structural-architect` is reserved for the `structure` slice,
   which already reviews cross-WU architecture. `--no-cross-cut` guarantees the
   router never returns the cross-cutting pair for a WU (which could otherwise
@@ -373,7 +384,9 @@ roles) are domain-specific. `build-integration-manifest.sh` emits a generic,
   covers this bin only with git-backed fixtures, not file-list fixtures.
 - `regression-consistency`: a **behavioral-review** slice over the whole merged
   diff (regressions + test coverage). Roles `[process-auditor, test-reviewer]`.
-  Always emitted. NB: this is distinct from the optional perf-`baseline`
+  Always emitted; its `target` is the full changed-file list
+  (`git diff --name-only` over the merge range) so reviewers have files to read.
+  NB: this is distinct from the optional perf-`baseline`
   comparison in §4, which stays skill-guided prose and is not a manifest slice.
 - `security` (conditional — only if `security_sensitive_paths` were touched):
   roles `[security-reviewer, process-auditor]`. Omitted otherwise (→ 2 slices).
@@ -408,7 +421,10 @@ gates:
   merge_main: [build, lint, test, typecheck]
 test_path_globs: ["tests/**", "**/*_test.*", "**/*.spec.*", "**/test_*"]
 review:
-  use_external_agents: true
+  use_external_agents: false   # AUTHORITATIVE shipped default — /init scaffolds
+                               # this as false. Flip to true only after the WU8
+                               # smoke test confirms cross-plugin agent dispatch
+                               # (§5 resolve-roles, §10).
   security_sensitive_paths: ["auth/**", "**/crypto*"]
 ---
 # Free-form project notes the skill should respect.
@@ -445,10 +461,19 @@ paths) rather than assuming the process working directory.
   via the verified advisory shape
   `{"hookSpecificOutput": {"permissionDecision": "allow"}, "systemMessage": "…"}`.
   Silent fast-exit otherwise.
-- **Stop:** pre-commit checklist reminder assembled from `gates.pre_commit`.
+- **Stop:** pre-commit checklist reminder assembled from `gates.pre_commit`,
+  emitted as `{"decision": "approve", "systemMessage": "…"}` (the documented
+  Stop-hook shape; `"block"` with a `"reason"` is available but unused here).
   Defers silently when a `ralph-loop` is active in the current session
   (identical session-id check to CYCAS `stop.py`, reading
   `.claude/ralph-loop.local.md`), so review-loops aren't interrupted.
+
+**Hook-format correction:** CYCAS's `pretooluse.py` emits the legacy
+`{"decision": "approve"}` shape, which is the *Stop*-hook format, not the
+documented PreToolUse format. This port deliberately uses the correct
+PreToolUse shape (`hookSpecificOutput.permissionDecision`, per the plugin-dev
+hook-development reference) — a small, safe correction, not a verbatim port of
+the CYCAS hook body.
 
 **Note on "enforcement":** CYCAS's hooks are advisory; real enforcement comes
 from the review-fix loop's deterministic exit gate (`check-approve.py`) and the
@@ -497,6 +522,7 @@ below means runtime/best-effort, not a platform-declared relationship.
 | Generic fallback reviewers (correctness/security/test/type) | **New**, thin |
 | `SKILL.md` + `work-unit-protocol.md` | **New**/ported backbone |
 | `commands/workflow.md`, `commands/quality-gate.md` | Port from cycas, strip specifics |
+| `commands/{plan,code,master-plan,integration}-review-loop.md` (4 files) | Port from cycas, rename; each is a thin wrapper invoking the matching `scripts/run-*-loop.sh` driver |
 | `commands/init.md` + config schema | **New** |
 | Hooks (`pretooluse.py`, `stop.py`, `hooks.json`) | Port, config-driven via `read-config.py` |
 | pytest suites (`scripts/tests/*`) + fixtures | Port `test_check_approve.py`/`test_detect_review_type.py`/`test_build_*_manifest.py`; **new** `test_route_change.py`/`test_resolve_roles.py`/`test_read_config.py`; convert fixtures to generic paths. Part of every script's Work Unit (tests land with the code they cover). |
