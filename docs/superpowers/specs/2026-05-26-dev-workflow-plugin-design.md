@@ -138,7 +138,8 @@ Ported from CYCAS Section 12.2 into `work-unit-protocol.md` (progressive
 disclosure — read only when a Large task is identified):
 
 - Master Plan phase: `doc/task/` dir, `master_plan.md` (objective, WU
-  definitions ≤5 files preferred / ≤10 hard limit, dependency DAG, function/
+  definitions ≤5 files preferred, ≤8 with written justification, ≤10 hard
+  limit, dependency DAG, function/
   region ownership for shared files, global ordering rules), `wu_status.md`
   dashboard, per-WU `wu{N}_plan.md`.
 - **Baseline capture (optional):** if config defines a `baseline` command, the
@@ -164,6 +165,20 @@ which takes a file list and returns a role pair. `detect-review-type.sh`,
 `build-master-plan-manifest.sh` (per WU), and `build-integration-manifest.sh`
 all call it. There is exactly one routing table in the plugin.
 
+**`route-change.sh` interface contract:**
+- **Input:** a newline-separated file list on stdin
+  (`printf '%s\n' "${FILES[@]}" | route-change.sh`).
+- **Output:** exactly two lines on stdout — `ROLE1=<role>` then `ROLE2=<role>`
+  — using the abstract role vocabulary only (no `subagent_type` namespacing,
+  no modifiers). Callers parse these two lines.
+- **Exit:** 0 on success; 2 on empty input.
+- Reads config (`security_sensitive_paths`, `test_path_globs`,
+  `scope_thresholds.{files,subsystems}`) via `read-config.py`, falling back to
+  documented defaults when config is absent.
+- **Optional flag `--no-cross-cut`:** suppresses the cross-cutting row (used by
+  the per-WU caller — see "Master-plan manifest" below), so per-WU routing only
+  ever returns a single-domain ROLE1.
+
 **Change-shape routing table** (replaces CYCAS physics-path routing):
 
 | Change shape (from the file list) | Reviewer 1 (role) | Reviewer 2 (role) |
@@ -171,7 +186,7 @@ all call it. There is exactly one routing table in the plugin.
 | Touches `review.security_sensitive_paths` (config glob) | security-reviewer | process-auditor |
 | Test-only diff (all files match `test_path_globs`) | test-reviewer | process-auditor |
 | Mostly type/interface definitions (see heuristic) | type-design-reviewer | process-auditor |
-| Cross-cutting (≥ `scope_thresholds.subsystems`+1 top-level dirs, OR file count > `scope_thresholds.files`) | correctness-reviewer | structural-architect |
+| Cross-cutting (top-level dirs touched > `scope_thresholds.subsystems`, OR file count > `scope_thresholds.files`) | correctness-reviewer | structural-architect |
 | Default (general production code) | correctness-reviewer | process-auditor |
 
 - **Subsystem detection:** top-level directory of each changed file (generic),
@@ -182,8 +197,9 @@ all call it. There is exactly one routing table in the plugin.
   `*types*`/`*interface*`/`*.proto`, OR whose diff is dominated by
   `type`/`interface`/`struct`/`enum` declarations. Starts conservative; refined
   during implementation with fixtures.
-- CYCAS's `+source-term-checklist` append has no generic analogue and is
-  dropped.
+- CYCAS's `+source-term-checklist` role modifier has no generic analogue and is
+  dropped: `route-change.sh` returns clean, unmodified role names, and no caller
+  mutates the role strings after it returns.
 
 ### Config reading — `read-config.py` (NEW)
 
@@ -214,10 +230,18 @@ unavailable — decided at implementation; no shell YAML parsing anywhere).
   → convergence check → loop). It contains **two** token classes that MUST be
   substituted on copy (CYCAS hardcodes both):
   1. `{{CHECK_APPROVE_PATH}}` → absolute path to the ported `check-approve.py`.
-  2. `{{REVIEW_DIR}}` → `.claude/dev-review` (CYCAS uses literal
-     `.claude/cycas-review/` in 6 places: manifest path, `iteration-M.md`,
-     `latest.md` symlink, `convergence-report.md`, `findings-index.md`). All
-     occurrences are tokenized.
+     This token **already exists** in CYCAS's prompt; the drivers substitute it
+     (CYCAS does this via `awk`).
+  2. `{{REVIEW_DIR}}` → `.claude/dev-review`. This token does **NOT** exist in
+     CYCAS's prompt — CYCAS hardcodes the literal string `.claude/cycas-review/`
+     in ~8 places (manifest path, `iteration-M.md`, `latest.md` symlink,
+     `convergence-report.md`, `findings-index.md`). The port is a two-step
+     operation: (a) copy the file, then (b) find-replace every literal
+     `.claude/cycas-review/` → `{{REVIEW_DIR}}` to *inject* the placeholder.
+     The drivers then substitute `{{REVIEW_DIR}}` → `.claude/dev-review` at
+     render time (same `awk`/`sed` pass as `{{CHECK_APPROVE_PATH}}`). Skipping
+     step (b) would leave the loop reading/writing the wrong directory and
+     silently break it.
   The completion-promise tag `<promise>CYCAS-REVIEW-DONE</promise>` →
   `<promise>DEV-REVIEW-DONE</promise>`. The stuck-exit artifact is written to
   `{{REVIEW_DIR}}/convergence-report.md`.
@@ -225,6 +249,9 @@ unavailable — decided at implementation; no shell YAML parsing anywhere).
 - **`run-*-loop.sh` drivers** — copied, renamed, and edited so that:
   - `mkdir`/manifest/iteration paths use `.claude/dev-review` (the value
     tokenized as `{{REVIEW_DIR}}` in the prompt).
+  - The prompt template is located at
+    `$CLAUDE_PLUGIN_ROOT/skills/dev-workflow/review-loop-prompt.md` (rendered to
+    a temp file after token substitution, as CYCAS does).
   - The `--completion-promise` argument is `DEV-REVIEW-DONE` (must match the
     prompt's `<promise>` tag exactly — a coupled substitution; mismatch means
     the loop never unblocks).
@@ -240,8 +267,11 @@ unavailable — decided at implementation; no shell YAML parsing anywhere).
 CYCAS hardcodes `/Users/qingz/.claude/plugins/cache/.../ralph-loop/1.0.0/scripts/setup-ralph-loop.sh`
 — breaks on any other machine. `find-ralph.sh` resolves it portably:
 1. `$RALPH_LOOP_ROOT` env var if set; else
-2. derive the plugin cache root from `$CLAUDE_PLUGIN_ROOT` and glob
-   `*/ralph-loop/*/scripts/setup-ralph-loop.sh`, picking the highest version.
+2. `$CLAUDE_PLUGIN_ROOT` points to *this* plugin's own dir
+   (`.../cache/<marketplace>/dev-workflow/<version>/`). Walk up to the cache
+   root — `cache_root=$(dirname $(dirname $(dirname "$CLAUDE_PLUGIN_ROOT")))` —
+   then glob `"$cache_root"/*/ralph-loop/*/scripts/setup-ralph-loop.sh` and pick
+   the highest version via `sort -V`.
 Hard error with an actionable message if not found (ralph-loop is a required
 dependency, §8). ralph-loop's verified interface: `--completion-promise '<text>'`
 and `--max-iterations <n>`.
@@ -273,9 +303,15 @@ Resolution table:
 | `structural-architect` | `dev-workflow:structural-architect` (always owned) | same |
 
 (The left column is this plugin's abstract vocabulary; the right columns are
-real, dispatchable agent names. Plugin-namespaced `subagent_type` strings like
-`pr-review-toolkit:code-reviewer` are valid — confirmed by Claude Code's
-agent-naming convention.)
+real, dispatchable agent names.) Plugin-namespaced `subagent_type` strings like
+`pr-review-toolkit:code-reviewer` are *inferred* to be valid from existing
+ecosystem usage (e.g. `feature-dev:code-architect`), but this is **not yet
+empirically confirmed for cross-plugin dispatch**. WU8 (§10) MUST include a
+smoke test that dispatches one plugin-namespaced agent and verifies it resolves;
+if the format proves invalid, the fallback is to use plugin-owned reviewers only
+(set `use_external_agents: false` as the default until validated).
+`resolve-roles.py` is idempotent — re-running it on an already-resolved manifest
+is a no-op (it only rewrites roles still in the abstract vocabulary).
 
 **Verdict contract:** every reviewer — owned or external — must emit a first
 line matching `^VERDICT: (APPROVE|CONDITIONAL APPROVE|REJECT)$`. Plugin-owned
@@ -292,9 +328,20 @@ contract. Accepted; the deterministic `check-approve.py` still gates the exit.
 
 | Builder | `mode` | Stuck threshold | Driver `--max-iterations` |
 |---------|--------|-----------------|---------------------------|
-| `detect-review-type.sh` (plan & code loops) | `simple` | iter ≥ 6 | 7 |
+| `detect-review-type.sh` (plan & code modes) | `simple` | iter ≥ 6 | 7 |
 | `build-integration-manifest.sh` | `integration` | iter ≥ 8 | 9 |
 | `build-master-plan-manifest.sh` | `master-plan` | iter ≥ 10 | 11 |
+
+### `detect-review-type.sh` — plan vs code mode
+
+`detect-review-type.sh` builds the 1-slice `mode: simple` manifest for both the
+plan-review and code-review loops, but routes differently by mode:
+- **`code` mode:** pipes the `git diff` file list into `route-change.sh` and
+  uses the returned `[ROLE1, ROLE2]` pair.
+- **`plan` mode:** the target is a plan/design *document*, not a code change, so
+  change-shape routing does not apply. It emits a fixed pair
+  `[structural-architect, process-auditor]` (structural soundness + process
+  compliance — the right lens for a plan document).
 
 ### Master-plan manifest — per-WU roles (REWRITTEN)
 
@@ -302,10 +349,15 @@ contract. Accepted; the deterministic `check-approve.py` still gates the exit.
 - **Structural slice** (`id: structure`): targets `master_plan.md` +
   `wu_status.md`; roles `[structural-architect, process-auditor]`.
 - **Per-WU slices** (`id: wu{N}`): for each Work Unit, the script calls
-  `route-change.sh` on that WU's declared target file list to pick ROLE1
-  (change-shape-matched), with `process-auditor` as ROLE2. This replaces
-  CYCAS's physics-domain ROLE1 with the generic router output — no separate
-  routing table.
+  `route-change.sh --no-cross-cut` on that WU's declared target file list and
+  takes **only ROLE1** (the single-domain change-shape match); ROLE2 is
+  **always** `process-auditor`. The router's own ROLE2 is intentionally
+  discarded here — `structural-architect` is reserved for the `structure` slice,
+  which already reviews cross-WU architecture. `--no-cross-cut` guarantees the
+  router never returns the cross-cutting pair for a WU (which could otherwise
+  yield `structural-architect` as ROLE1/ROLE2 and collide with this rule). This
+  replaces CYCAS's physics-domain ROLE1 with the generic router output — no
+  separate routing table.
 
 ### Integration manifest — generic slice taxonomy (REWRITTEN)
 
@@ -313,10 +365,16 @@ CYCAS's integration slices (`coupling`/`mpi`/`physics-consistency` with physics
 roles) are domain-specific. `build-integration-manifest.sh` emits a generic,
 **2–3 slice** taxonomy from the merged diff:
 - `interface-coupling`: files on subsystem boundaries / changed public
-  interfaces (heuristic: files touched that are imported by ≥2 subsystems, or
-  match interface heuristics). Roles `[correctness-reviewer, structural-architect]`.
-- `regression-consistency`: the whole merged diff for behavioral regressions and
-  test coverage. Roles `[process-auditor, test-reviewer]`.
+  interfaces (heuristic: files imported by ≥2 subsystems, or matching the
+  interface heuristic). Roles `[correctness-reviewer, structural-architect]`.
+  Always emitted (target list may be empty). **Limitation (mirrors CYCAS):** the
+  import-based "≥2 subsystems" detection requires a real `git diff` and is
+  skipped in `--file-list` mode; `test_build_integration_manifest.py` therefore
+  covers this bin only with git-backed fixtures, not file-list fixtures.
+- `regression-consistency`: a **behavioral-review** slice over the whole merged
+  diff (regressions + test coverage). Roles `[process-auditor, test-reviewer]`.
+  Always emitted. NB: this is distinct from the optional perf-`baseline`
+  comparison in §4, which stays skill-guided prose and is not a manifest slice.
 - `security` (conditional — only if `security_sensitive_paths` were touched):
   roles `[security-reviewer, process-auditor]`. Omitted otherwise (→ 2 slices).
 
@@ -359,9 +417,10 @@ review:
 - Names in `gates.*` (e.g. `build`, `lint`) reference the top-level command
   keys. A gate listing a key whose command is empty/undefined is skipped with a
   warning.
-- The cross-cutting routing row (§5) reads its file-count threshold from
-  `scope_thresholds.files` and its subsystem count from
-  `scope_thresholds.subsystems`.
+- Only `scope_thresholds.files` and `scope_thresholds.subsystems` are consumed
+  mechanically (by `route-change.sh`). `scope_thresholds.loc` and
+  `scope_thresholds.issues` are **skill-prose** scope-gate inputs only (§4 Step
+  2) — they are not wired into any script.
 - `test_path_globs` default list here is the canonical default; `route-change.sh`
   uses the identical list when config is absent.
 
@@ -375,11 +434,16 @@ is the only "detect" step; the result is persisted, not re-derived each session.
 ## 7. Hooks (`hooks/hooks.json` → two Python scripts)
 
 Both advisory (non-blocking) by default, matching CYCAS. Both read config via
-the shared `read-config.py` (§5).
+the shared `read-config.py` (§5). Hooks receive the project `cwd` in their JSON
+input; project-relative reads (`.claude/dev-workflow.local.md`,
+`.claude/ralph-loop.local.md`) resolve against that `cwd` (or use absolute
+paths) rather than assuming the process working directory.
 
 - **PreToolUse** (on `Edit`/`Write`): if the edited path matches
   `review.security_sensitive_paths`, surface a short generic reminder
-  ("security-sensitive path — review auth/crypto/input-validation invariants").
+  ("security-sensitive path — review auth/crypto/input-validation invariants")
+  via the verified advisory shape
+  `{"hookSpecificOutput": {"permissionDecision": "allow"}, "systemMessage": "…"}`.
   Silent fast-exit otherwise.
 - **Stop:** pre-commit checklist reminder assembled from `gates.pre_commit`.
   Defers silently when a `ralph-loop` is active in the current session
@@ -391,11 +455,13 @@ from the review-fix loop's deterministic exit gate (`check-approve.py`) and the
 skill's user-approval gates. This plugin matches that — the "enforcement hooks"
 pillar is delivered as advisory reminders plus those hard gates, not as a
 tool-blocking hook. **Optional blocking guard (deferred unless requested):** a
-PreToolUse hook on `git commit` can genuinely block by emitting
-`{"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision":
-"deny", "permissionDecisionReason": "..."}}` (or exiting non-zero) when
-`gates.pre_commit` has not passed. PreToolUse *can* deny tool calls; this is a
-real mechanism, just out of scope for v1.
+PreToolUse hook on `git commit` (a `Bash` tool call) can genuinely block by
+emitting the verified shape
+`{"hookSpecificOutput": {"permissionDecision": "deny"}, "systemMessage": "<why>"}`
+(or exiting non-zero) when `gates.pre_commit` has not passed — the explanation
+goes in `systemMessage`, not inside `hookSpecificOutput`. PreToolUse *can* deny
+tool calls; this is a real mechanism (per the plugin-dev hook-development
+reference), just out of scope for v1.
 
 ## 8. Dependencies
 
@@ -445,7 +511,11 @@ Work Units — suggested partition: (WU1) verbatim/token-substituted core
 `route-change.sh` + `read-config.py` + `resolve-roles.py` + tests; (WU3) the
 three rewritten manifest builders + tests; (WU4) agents; (WU5)
 `SKILL.md` + `work-unit-protocol.md`; (WU6) commands + config + `/init`; (WU7)
-hooks; (WU8) marketplace registration + end-to-end smoke test.
+hooks; (WU8) marketplace registration + end-to-end smoke test, **including a
+test that dispatches one plugin-namespaced agent (e.g.
+`pr-review-toolkit:code-reviewer`) to confirm cross-plugin `subagent_type`
+dispatch actually works** — gating whether `use_external_agents` can default to
+true.
 
 **Open items (acceptable to defer to planning):**
 - Exact type/interface change-detection heuristic (start conservative, tune
