@@ -175,9 +175,11 @@ all call it. There is exactly one routing table in the plugin.
 - Reads config (`security_sensitive_paths`, `test_path_globs`,
   `scope_thresholds.{files,subsystems}`) via `read-config.py`, falling back to
   documented defaults when config is absent.
-- **Optional flag `--no-cross-cut`:** suppresses the cross-cutting row (used by
-  the per-WU caller — see "Master-plan manifest" below), so per-WU routing only
-  ever returns a single-domain ROLE1.
+- **Optional flag `--no-cross-cut`:** skips the cross-cutting row during
+  evaluation (used by the per-WU caller — see "Master-plan manifest" below), so
+  routing falls through to the next matching row (Default if nothing else
+  matches), keeping ROLE1 single-domain. `route-change.sh` always emits exactly
+  two `ROLE=` lines regardless of this flag.
 
 **Change-shape routing table** (replaces CYCAS physics-path routing):
 
@@ -246,7 +248,10 @@ unavailable — decided at implementation; no shell YAML parsing anywhere).
      (`rdir` has no trailing slash, matching the stripped literal). Substituting
      only `{{CHECK_APPROVE_PATH}}` — by copying CYCAS's single-variable `awk`
      line verbatim — would leave `{{REVIEW_DIR}}` unresolved; the second `gsub`
-     is mandatory.
+     is mandatory. In v1 the review dir is the hardcoded literal
+     `.claude/dev-review` (not config-driven); the prompt substitution and all
+     four `run-*-loop.sh` drivers (`mkdir` + `awk`) must use this identical
+     string.
   The completion-promise tag `<promise>CYCAS-REVIEW-DONE</promise>` →
   `<promise>DEV-REVIEW-DONE</promise>`. The stuck-exit artifact is written to
   `{{REVIEW_DIR}}/convergence-report.md`.
@@ -290,12 +295,15 @@ is **static, at loop-setup time** (not dynamic inside the prompt): each
 `run-*-loop.sh` driver invokes `resolve-roles.py` once after the manifest is
 built. `resolve-roles.py`:
 1. Reads `review.use_external_agents` from config and detects whether
-   `pr-review-toolkit` is installed by probing the plugins registry at
-   `<plugins-root>/installed_plugins.json` (the `<plugins-root>` is the
-   grandparent of the cache root located by `find-ralph.sh`; the same
-   directory holds `known_marketplaces.json`) for a `pr-review-toolkit@*` key.
-   If the registry path or key can't be resolved, it conservatively falls back
-   to plugin-owned reviewers. Exact path confirmed at WU2 implementation.
+   `pr-review-toolkit` is installed by probing
+   `<plugins-root>/installed_plugins.json` for a `pr-review-toolkit@*` key.
+   `<plugins-root>` is the **parent** of the `cache_root` that `find-ralph.sh`
+   computes — i.e. `dirname "$cache_root"`, equivalently four `dirname` hops
+   from `$CLAUDE_PLUGIN_ROOT`, resolving to `…/.claude/plugins` (the directory
+   that also holds `known_marketplaces.json`). If the registry file or key
+   can't be resolved, it conservatively falls back to plugin-owned reviewers.
+   WU2 asserts this path on first run and fails with an actionable message if
+   the registry is not found there.
 2. **Rewrites the manifest `roles` arrays in place**, replacing each abstract
    role with a concrete `subagent_type` string the Agent tool accepts.
 3. The prompt then reads already-concrete names and dispatches them verbatim.
@@ -468,12 +476,12 @@ paths) rather than assuming the process working directory.
   (identical session-id check to CYCAS `stop.py`, reading
   `.claude/ralph-loop.local.md`), so review-loops aren't interrupted.
 
-**Hook-format correction:** CYCAS's `pretooluse.py` emits the legacy
-`{"decision": "approve"}` shape, which is the *Stop*-hook format, not the
-documented PreToolUse format. This port deliberately uses the correct
-PreToolUse shape (`hookSpecificOutput.permissionDecision`, per the plugin-dev
-hook-development reference) — a small, safe correction, not a verbatim port of
-the CYCAS hook body.
+**Hook-format correction:** CYCAS's `pretooluse.py` emits a bare
+`{"decision": "approve"}`, which matches **neither** the documented PreToolUse
+shape (`hookSpecificOutput.permissionDecision`) **nor** the documented Stop
+shape (`decision` + `reason`). This port deliberately uses the correct
+PreToolUse shape per the plugin-dev hook-development reference — a small, safe
+correction, not a verbatim port of the CYCAS hook body.
 
 **Note on "enforcement":** CYCAS's hooks are advisory; real enforcement comes
 from the review-fix loop's deterministic exit gate (`check-approve.py`) and the
