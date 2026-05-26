@@ -1,7 +1,7 @@
 # dev-workflow Plugin — Design Spec
 
 **Date:** 2026-05-26
-**Status:** Under review (iteration 2)
+**Status:** Reviewer-approved (5 iterations, unanimous APPROVE) — pending user sign-off
 **Author:** brainstormed with Claude Code
 
 ## 1. Purpose
@@ -172,7 +172,7 @@ all call it. There is exactly one routing table in the plugin.
   — using the abstract role vocabulary only (no `subagent_type` namespacing,
   no modifiers). Callers parse these two lines.
 - **Exit:** 0 on success; 2 on empty input.
-- Reads config (`security_sensitive_paths`, `test_path_globs`,
+- Reads config (`review.security_sensitive_paths`, `test_path_globs`,
   `scope_thresholds.{files,subsystems}`) via `read-config.py`, falling back to
   documented defaults when config is absent.
 - **Optional flag `--no-cross-cut`:** skips the cross-cutting row during
@@ -351,8 +351,9 @@ contract. Accepted; the deterministic `check-approve.py` still gates the exit.
 
 ### `detect-review-type.sh` — plan vs code mode
 
-`detect-review-type.sh` builds the 1-slice `mode: simple` manifest for both the
-plan-review and code-review loops, but routes differently by mode:
+`detect-review-type.sh <plan|code> [path]` (mode passed as the first arg by the
+respective driver, mirroring CYCAS) builds the 1-slice `mode: simple` manifest
+for both the plan-review and code-review loops, but routes differently by mode:
 - **`code` mode:** pipes the `git diff` file list into `route-change.sh` and
   uses the returned `[ROLE1, ROLE2]` pair.
 - **`plan` mode:** the target is a plan/design *document*, not a code change, so
@@ -372,9 +373,10 @@ plan-review and code-review loops, but routes differently by mode:
   hardcoded to `process-auditor` regardless of what the router returns as its
   own ROLE2. The router's own ROLE2 is intentionally
   discarded here — `structural-architect` is reserved for the `structure` slice,
-  which already reviews cross-WU architecture. `--no-cross-cut` guarantees the
-  router never returns the cross-cutting pair for a WU (which could otherwise
-  yield `structural-architect` as ROLE1/ROLE2 and collide with this rule). This
+  which already reviews cross-WU architecture. `--no-cross-cut` keeps ROLE1
+  single-domain for a WU, so a multi-dir WU routes by its dominant change shape
+  rather than to the generic cross-cutting `correctness-reviewer` (which would
+  be indistinguishable from Default). This
   replaces CYCAS's physics-domain ROLE1 with the generic router output — no
   separate routing table.
 
@@ -392,8 +394,9 @@ roles) are domain-specific. `build-integration-manifest.sh` emits a generic,
   covers this bin only with git-backed fixtures, not file-list fixtures.
 - `regression-consistency`: a **behavioral-review** slice over the whole merged
   diff (regressions + test coverage). Roles `[process-auditor, test-reviewer]`.
-  Always emitted; its `target` is the full changed-file list
-  (`git diff --name-only` over the merge range) so reviewers have files to read.
+  Always emitted; its `target` is the changed-file list
+  (`git diff --name-only` over the merge range, soft-capped at ~30 files for
+  very large diffs) so reviewers have files to read.
   NB: this is distinct from the optional perf-`baseline`
   comparison in §4, which stays skill-guided prose and is not a manifest slice.
 - `security` (conditional — only if `security_sensitive_paths` were touched):
@@ -481,7 +484,9 @@ paths) rather than assuming the process working directory.
 shape (`hookSpecificOutput.permissionDecision`) **nor** the documented Stop
 shape (`decision` + `reason`). This port deliberately uses the correct
 PreToolUse shape per the plugin-dev hook-development reference — a small, safe
-correction, not a verbatim port of the CYCAS hook body.
+correction, not a verbatim port of the CYCAS hook body. (CYCAS's `stop.py`
+already uses the correct Stop shape and ports more closely to verbatim, message
+content aside.)
 
 **Note on "enforcement":** CYCAS's hooks are advisory; real enforcement comes
 from the review-fix loop's deterministic exit gate (`check-approve.py`) and the
