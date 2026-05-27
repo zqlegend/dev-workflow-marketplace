@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "mode": "simple",
+  "slices": [
+    {
+      "id": "default",
+      "target": ["doc/current_plan.md"],
+      "roles": ["physics-general", "process-auditor"]
+    }
+  ]
+}

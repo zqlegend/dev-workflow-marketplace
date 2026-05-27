@@ -1,0 +1,5 @@
+{
+  "name": "dev-workflow",
+  "version": "0.1.0",
+  "description": "Stack-agnostic disciplined development workflow: scope gate, plan/code/master-plan/integration review-fix loops, Work Units, config-driven quality gates."
+}
