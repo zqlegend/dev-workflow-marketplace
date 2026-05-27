@@ -1,0 +1,15 @@
+{
+    "name": "dev-workflow-local",
+    "description": "Stack-agnostic disciplined development workflow plugin",
+    "owner": {
+        "name": "qingz"
+    },
+    "plugins": [
+        {
+            "name": "dev-workflow",
+            "description": "Scope gate, review-fix loops, Work Units, config-driven gates",
+            "version": "0.1.0",
+            "source": "./plugins/dev-workflow"
+        }
+    ]
+}
