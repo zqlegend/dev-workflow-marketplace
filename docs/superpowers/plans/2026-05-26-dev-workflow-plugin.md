@@ -60,12 +60,16 @@ This file is domain-agnostic (verifies verdict structure only); no edits. NOTE: 
 ```bash
 export CY=/Users/qingz/.claude/plugins/cache/cycas-local/cycas-workflow/1.0.0
 cp "$CY/scripts/test_check_approve.py" plugins/dev-workflow/scripts/tests/test_check_approve.py
+# the test needs these two fixtures (anchored at tests/fixtures via Path(__file__).parent/"fixtures")
+cp "$CY/scripts/fixtures/iter_ok.md" "$CY/scripts/fixtures/manifest_simple.json" \
+   plugins/dev-workflow/scripts/tests/fixtures/
 ```
-Then open it and ensure the path it invokes is `check-approve.py` in the parent dir. If it references a relative `../check-approve.py`, keep; if it hardcodes a cycas path, replace with:
+The CYCAS test anchors at `SCRIPT = Path(__file__).parent / "check-approve.py"` and `FIXTURES = Path(__file__).parent / "fixtures"`. Relocating the test into `scripts/tests/` breaks the SCRIPT anchor (the script lives one level up in `scripts/`). Apply this exact edit — change ONLY the SCRIPT line:
 
 ```python
 SCRIPT = Path(__file__).resolve().parents[1] / "check-approve.py"
 ```
+Leave `FIXTURES = Path(__file__).parent / "fixtures"` unchanged — it now resolves to `scripts/tests/fixtures/`, where the `cp` above placed `iter_ok.md` and `manifest_simple.json`.
 
 - [ ] **Step 4: Run the ported verifier test — expect PASS**
 
@@ -276,12 +280,13 @@ Write each precondition + build block explicitly:
   Precondition (a): `[[ -f "doc/task/master_plan.md" ]] || { echo "ERROR: doc/task/master_plan.md not found" >&2; exit 1; }`
   Build line (b): `"$ROOT/scripts/build-master-plan-manifest.sh" --force`
 - **`run-integration-review-loop.sh`** — `MAXIT=9`. Args: `[--force] [--base REF] [--head REF]` —
-  parse explicitly so flags don't collide:
+  parse explicitly so flags don't collide. This block REPLACES the template's
+  `FORCE=0; for a in "$@"...` line (it sets `FORCE` itself):
   ```bash
-  BASE="main"; HEAD="HEAD"
+  BASE="main"; HEAD="HEAD"; FORCE=0
   while [[ $# -gt 0 ]]; do case "$1" in
     --base) BASE="$2"; shift 2;; --head) HEAD="$2"; shift 2;;
-    --force) shift;; *) shift;; esac; done
+    --force) FORCE=1; shift;; *) shift;; esac; done
   ```
   Precondition (a): validate refs — `git rev-parse --verify -q "$BASE" >/dev/null && git rev-parse --verify -q "$HEAD" >/dev/null || { echo "ERROR: bad --base/--head ref" >&2; exit 1; }` (no uncommitted-diff check).
   Build line (b): `BASE="$BASE" HEAD="$HEAD" "$ROOT/scripts/build-integration-manifest.sh" --force`
@@ -668,10 +673,11 @@ def write_manifest(p, roles):
 
 def run(manifest, *, external_present, use_external, cwd):
     # fake plugins-root: cwd/.claude/plugins/installed_plugins.json
+    # MUST mirror the real nested shape: {"version": N, "plugins": {...}}
     reg = cwd / ".claude/plugins"
     reg.mkdir(parents=True, exist_ok=True)
-    plugins = {"pr-review-toolkit@x": [{}]} if external_present else {}
-    (reg / "installed_plugins.json").write_text(json.dumps(plugins))
+    pmap = {"pr-review-toolkit@official": [{}]} if external_present else {}
+    (reg / "installed_plugins.json").write_text(json.dumps({"version": 2, "plugins": pmap}))
     # CLAUDE_PLUGIN_ROOT = cwd/.claude/plugins/cache/mkt/dev-workflow/1.0.0
     pr = reg / "cache/mkt/dev-workflow/1.0.0"; pr.mkdir(parents=True, exist_ok=True)
     # config controlling use_external_agents
@@ -762,7 +768,9 @@ def pr_toolkit_installed():
         data = json.loads(reg.read_text())
     except Exception:
         return False
-    return any(k.split("@")[0] == "pr-review-toolkit" for k in data)
+    # real registry shape: {"version": N, "plugins": {"pr-review-toolkit@<mkt>": [...]}}
+    plugins = data.get("plugins", data) if isinstance(data, dict) else {}
+    return any(k.split("@")[0] == "pr-review-toolkit" for k in plugins)
 
 def resolve(role, external_ok):
     if role in ALWAYS_OWNED:
@@ -1069,7 +1077,7 @@ mapfile -t CHANGED < <(git diff --name-only "$BASE...$HEAD" 2>/dev/null | sort -
 mapfile -t SEC < <(python3 "$HERE/read-config.py" review.security_sensitive_paths "" 2>/dev/null || true)
 
 # classify files: emit "IFACE\t<f>" and/or "SEC\t<f>" (single source of glob logic)
-SEC_STR=$(printf '%s\n' "${SEC[@]:-}")
+if [[ ${#SEC[@]} -gt 0 ]]; then SEC_STR=$(printf '%s\n' "${SEC[@]}"); else SEC_STR=""; fi
 FILES_STR=$(printf '%s\n' "${CHANGED[@]}")
 CLASS=$(python3 - "$SEC_STR" "$FILES_STR" <<'PY'
 import sys, fnmatch
@@ -1191,7 +1199,15 @@ Reference file:line for every finding. Do not invent findings. You Read/Grep/Glo
 
 - [ ] **Step 1: Write `SKILL.md`** — port the structure of `CY/skills/cycas-workflow/SKILL.md` with stack specifics removed. Must include: frontmatter (`name: dev-workflow`, broad `description` of trigger verbs); Step 0 resume-check + config load via `read-config.py`; Step 1 generic task-type table (spec §4); Step 2 Small/Large gate using `scope_thresholds`; lifecycle phases (Design→brainstorming, Plan→writing-plans, Plan-Review, Build, Code-Review loop, Test, Deliver); the role-resolution table (spec §5); quality gates generated from `gates.*`; behavior rules (start with scope gate, never self-review, root-cause discipline, enforce hard gates); and the review-loop command list. Reference `work-unit-protocol.md` for Large tasks (progressive disclosure).
 
-- [ ] **Step 2: Write `work-unit-protocol.md`** — port CY Section 12.2: master-plan phase (`doc/task/`, `master_plan.md` with WU defs ≤5 pref/≤8 justified/≤10 hard + DAG + ownership, `wu_status.md` dashboard, per-WU `wu{N}_plan.md` with the `TARGETS:` block the builder reads), optional baseline capture (only if config `baseline` set), master-plan review loop, user gate, per-WU lifecycle, integration phase.
+- [ ] **Step 2: Write `work-unit-protocol.md`** — port CY Section 12.2: master-plan phase (`doc/task/`, `master_plan.md` with WU defs ≤5 pref/≤8 justified/≤10 hard + DAG + ownership, `wu_status.md` dashboard, per-WU `wu{N}_plan.md`), optional baseline capture (only if config `baseline` set), master-plan review loop, user gate, per-WU lifecycle, integration phase. **Each `wu{N}_plan.md` MUST contain the exact `TARGETS:` block the master-plan builder parses** (WU3 `build-master-plan-manifest.sh` reads it via `awk '/^TARGETS:/{f=1;next} f&&NF{print} f&&!NF{exit}'`): a line containing exactly `TARGETS:`, then one file path per line, terminated by a blank line. Example to include verbatim in the protocol doc:
+
+  ```
+  TARGETS:
+  src/foo.py
+  src/bar.py
+
+  ```
+  Any other format (e.g. a `Files:` heading or a fenced list) yields empty targets and degrades the per-WU route to `correctness-reviewer`.
 
 - [ ] **Step 3: Validate skill frontmatter loads** — `python3 -c "import yaml,sys; print(yaml.safe_load(open('plugins/dev-workflow/skills/dev-workflow/SKILL.md').read().split('---')[1]))"` prints a dict with `name` and `description`.
 
