@@ -48,14 +48,17 @@ Note: `.claude-plugin/` must be created first (`mkdir -p plugins/dev-workflow/.c
 - [ ] **Step 2: Copy the verifier verbatim**
 
 ```bash
+cd /Users/qingz/dev-workflow-marketplace
+export CY=/Users/qingz/.claude/plugins/cache/cycas-local/cycas-workflow/1.0.0
 cp "$CY/scripts/check-approve.py" plugins/dev-workflow/scripts/check-approve.py
 chmod +x plugins/dev-workflow/scripts/check-approve.py
 ```
-(`CY=/Users/qingz/.claude/plugins/cache/cycas-local/cycas-workflow/1.0.0`.) This file is domain-agnostic (verifies verdict structure only); no edits.
+This file is domain-agnostic (verifies verdict structure only); no edits. NOTE: shell state does not persist between steps — re-run `export CY=...` at the start of any later step that uses `$CY` (Steps 3 and 9).
 
 - [ ] **Step 3: Port the verifier test, point it at the copied script**
 
 ```bash
+export CY=/Users/qingz/.claude/plugins/cache/cycas-local/cycas-workflow/1.0.0
 cp "$CY/scripts/test_check_approve.py" plugins/dev-workflow/scripts/tests/test_check_approve.py
 ```
 Then open it and ensure the path it invokes is `check-approve.py` in the parent dir. If it references a relative `../check-approve.py`, keep; if it hardcodes a cycas path, replace with:
@@ -171,6 +174,7 @@ Expected: 3 PASS.
 - [ ] **Step 9: Port + tokenize the loop prompt**
 
 ```bash
+export CY=/Users/qingz/.claude/plugins/cache/cycas-local/cycas-workflow/1.0.0
 cp "$CY/skills/cycas-workflow/review-loop-prompt.md" plugins/dev-workflow/skills/dev-workflow/review-loop-prompt.md
 cd plugins/dev-workflow/skills/dev-workflow
 # inject {{REVIEW_DIR}} (no trailing slash) and rename the completion promise
@@ -214,9 +218,9 @@ REVIEW_DIR=".claude/dev-review"          # must match {{REVIEW_DIR}} substitutio
 PROMISE="DEV-REVIEW-DONE"
 MAXIT=7
 
-FORCE=0; [[ "${1:-}" == "--force" ]] && FORCE=1
+FORCE=0; for a in "$@"; do [[ "$a" == "--force" ]] && FORCE=1; done
 
-# (a) require a non-empty uncommitted diff
+# (a) require a non-empty uncommitted diff (working-tree OR staged)
 if git diff --quiet HEAD -- . 2>/dev/null && git diff --quiet --cached 2>/dev/null; then
   echo "ERROR: no uncommitted changes to review." >&2; exit 1
 fi
@@ -235,12 +239,17 @@ SCHEMA=$(jq -r '.schema_version' "$REVIEW_DIR/manifest.json")
 # (d) resolve abstract roles -> concrete subagent_type (no-op if helper absent yet)
 [[ -f "$ROOT/scripts/resolve-roles.py" ]] && python3 "$ROOT/scripts/resolve-roles.py" "$REVIEW_DIR/manifest.json"
 
-# (e) render prompt: substitute BOTH tokens in one pass
+# (e) render prompt: substitute BOTH tokens with LITERAL replacement (python str.replace,
+# so a '&' or '\' in $CHECK can't corrupt the output as it would with awk/sed gsub)
 CHECK="$ROOT/scripts/check-approve.py"
 PROMPT_FILE=$(mktemp -t dev-loop-prompt.XXXXXX)
-awk -v chk="$CHECK" -v rdir="$REVIEW_DIR" \
-  '{gsub(/\{\{CHECK_APPROVE_PATH\}\}/,chk); gsub(/\{\{REVIEW_DIR\}\}/,rdir); print}' \
-  "$ROOT/skills/dev-workflow/review-loop-prompt.md" > "$PROMPT_FILE"
+python3 - "$ROOT/skills/dev-workflow/review-loop-prompt.md" "$CHECK" "$REVIEW_DIR" > "$PROMPT_FILE" <<'PY'
+import sys
+src, chk, rdir = sys.argv[1], sys.argv[2], sys.argv[3]
+sys.stdout.write(open(src).read()
+                 .replace("{{CHECK_APPROVE_PATH}}", chk)
+                 .replace("{{REVIEW_DIR}}", rdir))
+PY
 
 # (f) hand to ralph-loop
 RALPH=$("$ROOT/scripts/find-ralph.sh")
@@ -249,10 +258,34 @@ rm -f "$PROMPT_FILE"
 echo "Ralph-loop initialized (mode: code-review). Begin iteration 1."
 ```
 
-Per-driver differences:
-- `run-plan-review-loop.sh`: `MAXIT=7`; build line `"$ROOT/scripts/detect-review-type.sh" plan "${1:-doc/current_plan.md}" --force`; precondition is "plan file exists" not "diff non-empty".
-- `run-master-plan-review-loop.sh`: `MAXIT=11`; build line `"$ROOT/scripts/build-master-plan-manifest.sh" --force`.
-- `run-integration-review-loop.sh`: `MAXIT=9`; build line `"$ROOT/scripts/build-integration-manifest.sh" "$@"` (passes `--base`/`--head`).
+The code-review driver above keeps the uncommitted-diff precondition. The other
+three drivers share steps (c)–(f) verbatim but have DIFFERENT `MAXIT`, arg
+grammar, precondition (a), and build line (b). Each driver parses `--force` by
+scanning all args (as in the template); none uses positional `$1` for `--force`.
+Write each precondition + build block explicitly:
+
+- **`run-plan-review-loop.sh`** — `MAXIT=7`. Args: `[--force] [<plan-path>]` — the
+  first non-flag arg is the plan path (default `doc/current_plan.md`):
+  ```bash
+  PLAN="doc/current_plan.md"
+  for a in "$@"; do [[ "$a" != --* ]] && PLAN="$a"; done
+  ```
+  Precondition (a): `[[ -f "$PLAN" ]] || { echo "ERROR: plan file not found: $PLAN" >&2; exit 1; }`
+  Build line (b): `"$ROOT/scripts/detect-review-type.sh" plan "$PLAN" --force`
+- **`run-master-plan-review-loop.sh`** — `MAXIT=11`. Args: `[--force]`.
+  Precondition (a): `[[ -f "doc/task/master_plan.md" ]] || { echo "ERROR: doc/task/master_plan.md not found" >&2; exit 1; }`
+  Build line (b): `"$ROOT/scripts/build-master-plan-manifest.sh" --force`
+- **`run-integration-review-loop.sh`** — `MAXIT=9`. Args: `[--force] [--base REF] [--head REF]` —
+  parse explicitly so flags don't collide:
+  ```bash
+  BASE="main"; HEAD="HEAD"
+  while [[ $# -gt 0 ]]; do case "$1" in
+    --base) BASE="$2"; shift 2;; --head) HEAD="$2"; shift 2;;
+    --force) shift;; *) shift;; esac; done
+  ```
+  Precondition (a): validate refs — `git rev-parse --verify -q "$BASE" >/dev/null && git rev-parse --verify -q "$HEAD" >/dev/null || { echo "ERROR: bad --base/--head ref" >&2; exit 1; }` (no uncommitted-diff check).
+  Build line (b): `BASE="$BASE" HEAD="$HEAD" "$ROOT/scripts/build-integration-manifest.sh" --force`
+  (the builder reads `$BASE`/`$HEAD` from the environment — see WU3 Step 10).
 
 ```bash
 chmod +x plugins/dev-workflow/scripts/run-*.sh
@@ -385,11 +418,13 @@ def load_frontmatter(path):
         return {}
     return yaml.safe_load(parts[1]) or {}
 
+_MISSING = object()
+
 def dig(data, dotted):
     cur = data
     for part in dotted.split("."):
         if not isinstance(cur, dict) or part not in cur:
-            return None
+            return _MISSING
         cur = cur[part]
     return cur
 
@@ -414,7 +449,7 @@ def main():
         sys.exit(3)
 
     val = dig(load_frontmatter(CONFIG), key)
-    if val is None:
+    if val is _MISSING:
         if default is not None:
             print(default); return
         sys.exit(3)
@@ -537,6 +572,8 @@ DEFAULT_TEST_GLOBS = ["tests/**", "**/*_test.*", "**/*.spec.*", "**/test_*"]
 def cfg(key, default):
     r = subprocess.run(["python3", str(RC), key, default],
                        capture_output=True, text=True)
+    if r.returncode != 0 or not r.stdout.strip():
+        return default
     return r.stdout.rstrip("\n")
 
 def cfg_list(key, default_list):
@@ -836,7 +873,8 @@ MODE="${1:-}"; FORCE=0; for a in "$@"; do [[ "$a" == "--force" ]] && FORCE=1; do
 [[ -f "$MANIFEST" && $FORCE -eq 0 ]] && { echo "manifest exists; use --force" >&2; exit 1; }
 
 if [[ "$MODE" == "code" ]]; then
-  mapfile -t CHANGED < <(git diff --name-only HEAD 2>/dev/null)
+  # capture BOTH working-tree and staged changes vs HEAD, deduplicated
+  mapfile -t CHANGED < <({ git diff --name-only HEAD; git diff --cached --name-only; } 2>/dev/null | sort -u)
   [[ ${#CHANGED[@]} -eq 0 ]] && { echo "no changed files" >&2; exit 2; }
   read R1 R2 < <(printf '%s\n' "${CHANGED[@]}" | python3 "$HERE/route-change.py" \
                  | awk -F= '/ROLE1/{r1=$2} /ROLE2/{r2=$2} END{print r1, r2}')
@@ -919,11 +957,13 @@ for plan in "$TASK"/wu*_plan.md; do
   id=$(basename "$plan" | sed -E 's/_plan\.md$//')   # wu1, wu2, ...
   # WU plan declares its files after a 'TARGETS:' line, one per line until blank/EOF
   mapfile -t WUF < <(awk '/^TARGETS:/{f=1;next} f&&NF{print} f&&!NF{exit}' "$plan")
-  if [[ ${#WUF[@]} -eq 0 ]]; then R1="correctness-reviewer"; else
+  if [[ ${#WUF[@]} -eq 0 ]]; then
+    R1="correctness-reviewer"; TJSON='[]'
+  else
     R1=$(printf '%s\n' "${WUF[@]}" | python3 "$HERE/route-change.py" --no-cross-cut \
          | awk -F= '/ROLE1/{print $2}')
+    TJSON=$(printf '%s\n' "${WUF[@]}" | jq -R . | jq -s .)
   fi
-  TJSON=$(printf '%s\n' "${WUF[@]:-}" | jq -R . | jq -s 'map(select(length>0))')
   SLICES=$(echo "$SLICES" | jq --arg id "$id" --arg r1 "$R1" --argjson t "$TJSON" \
     '. + [{id:$id, target:$t, roles:[$r1,"process-auditor"]}]')
 done
@@ -938,11 +978,150 @@ chmod +x build-master-plan-manifest.sh
 
 - [ ] **Step 9: Run — expect PASS.** Commit.
 
-- [ ] **Step 10: Failing test + implement `build-integration-manifest.sh`**
+- [ ] **Step 10: Write failing test for `build-integration-manifest.sh`**
 
-Generic 2–3 slice taxonomy (`interface-coupling` always, `regression-consistency` always with target capped ~30, `security` only if a touched file matches `review.security_sensitive_paths`), `mode:"integration"`. Test asserts: 2 slices when no security paths touched, 3 when they are; correct ids/roles. Implementation collects `git diff --name-only ${BASE:-main}...${HEAD:-HEAD}`, builds the slices with `jq`, applies the security slice conditionally by checking each file against the configured globs (reuse a small Python check via `route-change.py`'s glob semantics or `python3 -c`). Roles per spec: `interface-coupling`→`[correctness-reviewer,structural-architect]`, `regression-consistency`→`[process-auditor,test-reviewer]`, `security`→`[security-reviewer,process-auditor]`. Commit.
+`PR/scripts/tests/test_build_integration_manifest.py`:
 
-- [ ] **Step 11: Run full script suite — all green.** `cd plugins/dev-workflow/scripts && python3 -m pytest -q`.
+```python
+import json, os, subprocess
+from pathlib import Path
+SCRIPT = Path(__file__).resolve().parents[1] / "build-integration-manifest.sh"
+
+def git(args, cwd): subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True)
+
+def setup(tmp_path):
+    git(["init","-q"], tmp_path); git(["config","user.email","t@t"], tmp_path)
+    git(["config","user.name","t"], tmp_path)
+    (tmp_path/"base.py").write_text("x=1\n"); git(["add","-A"], tmp_path)
+    git(["commit","-qm","base"], tmp_path); git(["branch","-M","main"], tmp_path)
+    git(["checkout","-q","-b","feature"], tmp_path)
+
+def run(tmp_path):
+    env = dict(os.environ, BASE="main", HEAD="HEAD")
+    return subprocess.run(["bash", str(SCRIPT), "--force"], cwd=tmp_path, env=env,
+                          capture_output=True, text=True)
+
+def manifest(tmp_path):
+    return json.loads((tmp_path/".claude/dev-review/manifest.json").read_text())
+
+def test_two_slices_no_security(tmp_path):
+    setup(tmp_path)
+    (tmp_path/"src.py").write_text("y=2\n"); git(["add","-A"], tmp_path); git(["commit","-qm","c"], tmp_path)
+    r = run(tmp_path); assert r.returncode == 0, r.stderr
+    m = manifest(tmp_path); assert m["mode"] == "integration"
+    assert [s["id"] for s in m["slices"]] == ["interface-coupling","regression-consistency"]
+    assert m["slices"][1]["roles"] == ["process-auditor","test-reviewer"]
+    assert m["slices"][0]["roles"] == ["correctness-reviewer","structural-architect"]
+
+def test_three_slices_with_security(tmp_path):
+    setup(tmp_path)
+    (tmp_path/".claude").mkdir()
+    (tmp_path/".claude/dev-workflow.local.md").write_text(
+        '---\nreview:\n  security_sensitive_paths: ["auth/**"]\n---\n')
+    (tmp_path/"auth").mkdir(); (tmp_path/"auth/login.py").write_text("z=3\n")
+    git(["add","-A"], tmp_path); git(["commit","-qm","c"], tmp_path)
+    r = run(tmp_path); assert r.returncode == 0, r.stderr
+    m = manifest(tmp_path)
+    assert [s["id"] for s in m["slices"]] == ["interface-coupling","regression-consistency","security"]
+    assert m["slices"][2]["roles"] == ["security-reviewer","process-auditor"]
+
+def test_interface_slice_captures_type_files(tmp_path):
+    setup(tmp_path)
+    (tmp_path/"api.d.ts").write_text("export type T = number;\n")
+    git(["add","-A"], tmp_path); git(["commit","-qm","c"], tmp_path)
+    r = run(tmp_path); assert r.returncode == 0, r.stderr
+    iface = [s for s in manifest(tmp_path)["slices"] if s["id"]=="interface-coupling"][0]
+    assert "api.d.ts" in iface["target"]
+
+def test_empty_range_exits_2(tmp_path):
+    setup(tmp_path)   # feature == main, no new commits
+    assert run(tmp_path).returncode == 2
+```
+
+- [ ] **Step 11: Run — expect FAIL**
+
+```bash
+cd plugins/dev-workflow/scripts && python3 -m pytest tests/test_build_integration_manifest.py -q
+```
+Expected: FAIL (script missing).
+
+- [ ] **Step 12: Implement `build-integration-manifest.sh`**
+
+```bash
+#!/usr/bin/env bash
+# Build the generic 2-3 slice integration manifest (mode: integration).
+# Reads BASE/HEAD from env (default main/HEAD).
+#   interface-coupling      [correctness-reviewer, structural-architect]  (always)
+#   regression-consistency  [process-auditor, test-reviewer]              (always; target capped)
+#   security                [security-reviewer, process-auditor]          (only if security paths touched)
+set -euo pipefail
+command -v jq >/dev/null || { echo "jq required" >&2; exit 2; }
+command -v git >/dev/null || { echo "git required" >&2; exit 2; }
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+OUT=".claude/dev-review"; MANIFEST="$OUT/manifest.json"; mkdir -p "$OUT"
+FORCE=0; for a in "$@"; do [[ "$a" == "--force" ]] && FORCE=1; done
+[[ -f "$MANIFEST" && $FORCE -eq 0 ]] && { echo "manifest exists; use --force" >&2; exit 1; }
+
+BASE="${BASE:-main}"; HEAD="${HEAD:-HEAD}"; CAP=30
+mapfile -t CHANGED < <(git diff --name-only "$BASE...$HEAD" 2>/dev/null | sort -u)
+[[ ${#CHANGED[@]} -eq 0 ]] && { echo "no changed files in $BASE...$HEAD" >&2; exit 2; }
+
+mapfile -t SEC < <(python3 "$HERE/read-config.py" review.security_sensitive_paths "" 2>/dev/null || true)
+
+# classify files: emit "IFACE\t<f>" and/or "SEC\t<f>" (single source of glob logic)
+SEC_STR=$(printf '%s\n' "${SEC[@]:-}")
+FILES_STR=$(printf '%s\n' "${CHANGED[@]}")
+CLASS=$(python3 - "$SEC_STR" "$FILES_STR" <<'PY'
+import sys, fnmatch
+sec   = [s for s in sys.argv[1].split("\n") if s]
+files = [f for f in sys.argv[2].split("\n") if f]
+def gm(p, g):
+    if g.endswith("/**"):
+        b = g[:-3]; return p == b or p.startswith(b + "/")
+    return fnmatch.fnmatch(p, g)
+def is_iface(f):
+    low = f.lower()
+    return f.endswith(".d.ts") or f.endswith(".proto") or "types" in low or "interface" in low
+for f in files:
+    if is_iface(f):              print("IFACE\t" + f)
+    if any(gm(f, g) for g in sec): print("SEC\t" + f)
+PY
+)
+mapfile -t IFACE < <(printf '%s\n' "$CLASS" | awk -F'\t' '/^IFACE/{print $2}')
+mapfile -t SECF  < <(printf '%s\n' "$CLASS" | awk -F'\t' '/^SEC/{print $2}')
+REG=("${CHANGED[@]:0:$CAP}")
+
+# explicit empty-array guards (no "${arr[@]:-}" footgun)
+if [[ ${#IFACE[@]} -gt 0 ]]; then IFACE_JSON=$(printf '%s\n' "${IFACE[@]}" | jq -R . | jq -s .); else IFACE_JSON='[]'; fi
+REG_JSON=$(printf '%s\n' "${REG[@]}" | jq -R . | jq -s .)
+
+SLICES=$(jq -n --argjson iface "$IFACE_JSON" --argjson reg "$REG_JSON" \
+  '[{id:"interface-coupling", target:$iface, roles:["correctness-reviewer","structural-architect"]},
+    {id:"regression-consistency", target:$reg, roles:["process-auditor","test-reviewer"]}]')
+if [[ ${#SECF[@]} -gt 0 ]]; then
+  SEC_JSON=$(printf '%s\n' "${SECF[@]}" | jq -R . | jq -s .)
+  SLICES=$(echo "$SLICES" | jq --argjson s "$SEC_JSON" \
+    '. + [{id:"security", target:$s, roles:["security-reviewer","process-auditor"]}]')
+fi
+jq -n --argjson slices "$SLICES" '{schema_version:1, mode:"integration", slices:$slices}' > "$MANIFEST"
+echo "Wrote $MANIFEST ($(echo "$SLICES" | jq length) slices)"
+```
+
+```bash
+chmod +x build-integration-manifest.sh
+```
+Note: `interface-coupling` uses a filename/type heuristic (testable in file-list mode); the spec's richer "imported by ≥2 subsystems" detection is deferred (spec §10 open item) — the heuristic above is the v1 behavior and is what the test asserts.
+
+- [ ] **Step 13: Run — expect PASS**
+
+```bash
+python3 -m pytest tests/test_build_integration_manifest.py -q
+```
+Expected: 4 PASS.
+
+- [ ] **Step 14: Commit.** `git add` the script + test; `git commit -m "feat(dev-workflow): WU3 build-integration-manifest.sh (generic 2-3 slice taxonomy)"`.
+
+- [ ] **Step 15: Run full script suite — all green.** `cd plugins/dev-workflow/scripts && python3 -m pytest -q`.
 
 ---
 
@@ -950,7 +1129,7 @@ Generic 2–3 slice taxonomy (`interface-coupling` always, `regression-consisten
 
 **Files:** Create `PR/agents/process-auditor.md`, `structural-architect.md`, `correctness-reviewer.md`, `security-reviewer.md`, `test-reviewer.md`, `type-design-reviewer.md`.
 
-Each agent's frontmatter: `name`, `description` (when-to-use), `tools: [Read, Grep, Glob]`, `model: sonnet`. Each body MUST open with the exact verdict contract so `check-approve.py` can parse it.
+Each agent's frontmatter: `name`, `description` (when-to-use), `tools` as a block list (`Read`/`Grep`/`Glob` — matching the convention in `CY/agents/process-auditor.md`), `model: sonnet`. Each body MUST open with the exact verdict contract so `check-approve.py` can parse it.
 
 - [ ] **Step 1: Port `process-auditor.md` from CY, strip CYCAS specifics**
 
@@ -978,7 +1157,10 @@ No leading whitespace. Findings follow on subsequent lines.
 ---
 name: correctness-reviewer
 description: Generic code-correctness reviewer for dev-workflow review-fix loops; fresh independent reviewer, emits a structured VERDICT line.
-tools: [Read, Grep, Glob]
+tools:
+  - Read
+  - Grep
+  - Glob
 model: sonnet
 ---
 You are a fresh, independent reviewer dispatched by the dev-workflow Review-Fix Cycle. You did NOT write the code under review.
@@ -1087,6 +1269,6 @@ Then verify `/dev-workflow:workflow` and `/dev-workflow:init` are listed.
 
 **Spec coverage:** §3 layout → WU1–WU8 create every listed file (verifier/prompt/drivers/find-ralph = WU1; read-config/route-change/resolve-roles = WU2; three builders = WU3; six agents = WU4; skill+protocol = WU5; commands+config+init = WU6; hooks = WU7; marketplace+tests = WU8). §5 routing/role-resolution → WU2+WU3. §6 config → WU6 + consumed throughout. §7 hooks → WU7. §9 dispositions all mapped. §10 WU partition matches. Open items resolved: pyyaml chosen (WU2); `use_external_agents` default false + smoke gate (WU6/WU8); interface-coupling heuristic deferred within WU3 step 10.
 
-**Placeholder scan:** New scripts (read-config.py, route-change.py, resolve-roles.py, find-ralph.sh, detect-review-type.sh, build-master-plan-manifest.sh) have complete code. Ported items give exact `cp`+`sed` from exact source paths + verification greps. Agents/skill/commands give frontmatter + mandatory verdict-contract block + focus bullets; WU3 step 10 and WU5/WU6/WU7 markdown bodies are specified by required-contents rather than full prose (acceptable for doc-type files, but the executing agent should expand them following the cited CY source + spec sections).
+**Placeholder scan:** All new scripts (read-config.py, route-change.py, resolve-roles.py, find-ralph.sh, detect-review-type.sh, build-master-plan-manifest.sh, build-integration-manifest.sh) have complete code + complete tests with FAIL→implement→PASS→commit steps. Ported items give exact `cp`+`sed` from exact source paths (with `export CY=...` in each step that uses it) + verification greps. Agents/skill/commands are doc-type files specified by frontmatter + mandatory verbatim verdict-contract block + required-contents + cited CY source + spec sections (acceptable deferral for prose deliverables; the executing agent expands them).
 
 **Type/name consistency:** role vocabulary (6 abstract names), `ROLE1=`/`ROLE2=` contract, mode values (`simple`/`master-plan`/`integration`), tokens (`{{CHECK_APPROVE_PATH}}`, `{{REVIEW_DIR}}`=`.claude/dev-review`, promise `DEV-REVIEW-DONE`), and `resolve-roles.py` external map are consistent across WU1–WU8.
