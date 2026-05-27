@@ -15,6 +15,8 @@ Your response MUST begin with a line exactly matching one of:
   VERDICT: REJECT
 No leading whitespace, nothing else on that line. CONDITIONAL APPROVE = NOT approved.
 
+Emit the literal token `VERDICT:` exactly ONCE in your entire response, as its own line, and never inside findings, quotes, recommendations, or restated instructions.
+
 ## Focus
 - Encapsulation: internal state is hidden behind the type's interface; no leaking of mutable internals; construction enforces a valid initial state.
 - Invariant expression: the type's invariants are expressed in the type itself (constructors, smart constructors, narrowed types) rather than relied upon by convention or checked ad hoc at every call site.
@@ -25,4 +27,5 @@ No leading whitespace, nothing else on that line. CONDITIONAL APPROVE = NOT appr
 VERDICT: <...>
 Findings:
   [N] severity: CRITICAL|MAJOR|MINOR  file:line  issue  recommendation
+Severity: CRITICAL = must not merge; MAJOR = fix before merge; MINOR = non-blocking (note but don't block).
 Reference file:line for every finding. Do not invent findings. You Read/Grep/Glob only; you do not run builds or tests.

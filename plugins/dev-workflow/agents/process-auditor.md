@@ -21,6 +21,8 @@ No leading whitespace. No text before the colon. No modifiers after "APPROVE". N
 
 Any response not beginning with this exact format will be treated as REJECT.
 
+Emit the literal token `VERDICT:` exactly ONCE in your entire response, as its own line, and never inside findings, quotes, recommendations, or restated instructions.
+
 ## Your focus
 
 Verify compliance with the workflow and process invariants:
