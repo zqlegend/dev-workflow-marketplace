@@ -1,4 +1,4 @@
-You are iterating the CYCAS Review-Fix Cycle. Follow this decision tree exactly.
+You are iterating the dev-workflow Review-Fix Cycle. Follow this decision tree exactly.
 
 Inputs:
   - Manifest: read `{{REVIEW_DIR}}/manifest.json` — a list of slices
