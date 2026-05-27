@@ -35,11 +35,20 @@ def run_hook(script, event):
     dir, to prove the hook resolves project-relative reads against the
     event `cwd`, not the process working directory.
     """
+    return run_hook_raw(script, json.dumps(event))
+
+
+def run_hook_raw(script, stdin_text):
+    """Invoke a hook script feeding raw `stdin_text` verbatim on stdin.
+
+    Same env/cwd contract as run_hook, but does not assume the payload is
+    valid JSON — used to exercise empty/malformed stdin resilience.
+    """
     import os
     env = dict(os.environ, CLAUDE_PLUGIN_ROOT=str(PLUGIN_ROOT))
     return subprocess.run(
         ["python3", str(script)],
-        input=json.dumps(event),
+        input=stdin_text,
         capture_output=True, text=True, env=env,
     )
 
@@ -90,6 +99,35 @@ def test_pretooluse_relative_path_matches(tmp_path):
     assert "security-sensitive" in out["systemMessage"]
 
 
+def test_pretooluse_multiedit_security_path_emits_message(tmp_path):
+    p = _proj(tmp_path)
+    event = {
+        "tool_name": "MultiEdit",
+        "tool_input": {"file_path": str(p / "auth" / "login.py")},
+        "cwd": str(p),
+        "session_id": "abc",
+    }
+    r = run_hook(PRETOOLUSE, event)
+    assert r.returncode == 0, r.stderr
+    out = json.loads(r.stdout)
+    assert out["hookSpecificOutput"]["permissionDecision"] == "allow"
+    assert "security-sensitive" in out["systemMessage"]
+
+
+def test_pretooluse_empty_stdin_allows():
+    r = run_hook_raw(PRETOOLUSE, "")
+    assert r.returncode == 0, r.stderr
+    out = json.loads(r.stdout)
+    assert out["hookSpecificOutput"]["permissionDecision"] == "allow"
+
+
+def test_pretooluse_malformed_stdin_allows():
+    r = run_hook_raw(PRETOOLUSE, "{not valid json")
+    assert r.returncode == 0, r.stderr
+    out = json.loads(r.stdout)
+    assert out["hookSpecificOutput"]["permissionDecision"] == "allow"
+
+
 def test_pretooluse_non_edit_write_fast_exit(tmp_path):
     p = _proj(tmp_path)
     event = {
@@ -116,6 +154,13 @@ def test_stop_emits_precommit_checklist(tmp_path):
     assert out["decision"] == "approve"
     msg = out["systemMessage"]
     assert "build" in msg and "lint" in msg and "test" in msg
+
+
+def test_stop_empty_stdin_approves():
+    r = run_hook_raw(STOP, "")
+    assert r.returncode == 0, r.stderr
+    out = json.loads(r.stdout)
+    assert out["decision"] == "approve"
 
 
 def test_stop_defers_when_ralph_active_in_session(tmp_path):

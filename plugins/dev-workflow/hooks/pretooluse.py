@@ -70,7 +70,7 @@ def main():
         hook_input = {}
 
     tool_name = hook_input.get("tool_name", "")
-    if tool_name not in ("Edit", "Write"):
+    if tool_name not in ("Edit", "Write", "MultiEdit"):
         _emit(ALLOW)
         return
 
