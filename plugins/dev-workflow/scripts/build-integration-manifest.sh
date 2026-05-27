@@ -17,7 +17,7 @@ mapfile -t CHANGED < <(git diff --name-only "$BASE...$HEAD" 2>/dev/null | sort -
 [[ ${#CHANGED[@]} -eq 0 ]] && { echo "no changed files in $BASE...$HEAD" >&2; exit 2; }
 
 # no default -> read-config exits 3 when absent; `|| true` swallows it so SEC stays empty
-mapfile -t SEC < <(python3 "$HERE/read-config.py" review.security_sensitive_paths 2>/dev/null || true)
+mapfile -t SEC < <(python3 "$HERE/read-config.py" review.security_sensitive_paths || true)
 
 # classify files: emit "IFACE\t<f>" and/or "SEC\t<f>" (single source of glob logic)
 if [[ ${#SEC[@]} -gt 0 ]]; then SEC_STR=$(printf '%s\n' "${SEC[@]}"); else SEC_STR=""; fi

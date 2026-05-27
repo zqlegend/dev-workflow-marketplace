@@ -11,7 +11,9 @@ TASK="doc/task"
 [[ -f "$TASK/master_plan.md" ]] || { echo "missing $TASK/master_plan.md" >&2; exit 2; }
 
 # structural slice
-STRUCT_TARGETS=$(printf '%s\n' "$TASK/master_plan.md" "$TASK/wu_status.md" | jq -R . | jq -s .)
+STATUS_FILES=("$TASK/master_plan.md")
+[[ -f "$TASK/wu_status.md" ]] && STATUS_FILES+=("$TASK/wu_status.md")
+STRUCT_TARGETS=$(printf '%s\n' "${STATUS_FILES[@]}" | jq -R . | jq -s .)
 SLICES=$(jq -n --argjson t "$STRUCT_TARGETS" \
   '[{id:"structure", target:$t, roles:["structural-architect","process-auditor"]}]')
 
