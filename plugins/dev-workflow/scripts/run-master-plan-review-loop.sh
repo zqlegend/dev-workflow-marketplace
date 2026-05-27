@@ -40,5 +40,5 @@ PY
 
 # (f) hand to ralph-loop (PROMPT_FILE is removed by the EXIT trap)
 RALPH=$("$ROOT/scripts/find-ralph.sh")
-"$RALPH" "$(cat "$PROMPT_FILE")" --completion-promise "$PROMISE" --max-iterations "$MAXIT"
+"$RALPH" "$(cat "$PROMPT_FILE")" --completion-promise "$PROMISE" --max-iterations "$MAXIT"  # ralph-loop expects the prompt text as $1
 echo "Ralph-loop initialized (mode: master-plan-review). Begin iteration 1."

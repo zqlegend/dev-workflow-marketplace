@@ -13,7 +13,10 @@ while [[ $# -gt 0 ]]; do case "$1" in
   --force) FORCE=1; shift;; *) shift;; esac; done
 
 # (a) validate refs (no uncommitted-diff check)
-git rev-parse --verify -q "$BASE" >/dev/null && git rev-parse --verify -q "$HEAD" >/dev/null || { echo "ERROR: bad --base/--head ref" >&2; exit 1; }
+if ! git rev-parse --verify -q "$BASE" >/dev/null 2>&1 || \
+   ! git rev-parse --verify -q "$HEAD" >/dev/null 2>&1; then
+  echo "ERROR: bad --base/--head ref" >&2; exit 1
+fi
 if [[ -f ".claude/ralph-loop.local.md" && $FORCE -eq 0 ]]; then
   echo "ERROR: prior loop state exists (.claude/ralph-loop.local.md). Use --force." >&2; exit 1
 fi
@@ -44,5 +47,5 @@ PY
 
 # (f) hand to ralph-loop (PROMPT_FILE is removed by the EXIT trap)
 RALPH=$("$ROOT/scripts/find-ralph.sh")
-"$RALPH" "$(cat "$PROMPT_FILE")" --completion-promise "$PROMISE" --max-iterations "$MAXIT"
+"$RALPH" "$(cat "$PROMPT_FILE")" --completion-promise "$PROMISE" --max-iterations "$MAXIT"  # ralph-loop expects the prompt text as $1
 echo "Ralph-loop initialized (mode: integration-review). Begin iteration 1."

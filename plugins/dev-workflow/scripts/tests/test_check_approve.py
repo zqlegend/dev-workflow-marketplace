@@ -150,3 +150,25 @@ VERDICT: APPROVE
 """)
     code, out = run(iter_file, FIXTURES / "manifest_simple.json")
     assert code == 3, f"Expected exit 3 (drift), got {code}. Output:\n{out}"
+
+
+def test_exit1_conditional_approve(tmp_path):
+    iter_file = _write(tmp_path, """nonce: a7f3c2e9
+slices_expected: [default]
+
+## Slice: default
+
+### Reviewer 1 (physics-general)
+VERDICT: CONDITIONAL APPROVE
+<!-- BEGIN-RAW-a7f3c2e9 -->
+VERDICT: CONDITIONAL APPROVE
+<!-- END-RAW-a7f3c2e9 -->
+
+### Reviewer 2 (process-auditor)
+VERDICT: APPROVE
+<!-- BEGIN-RAW-a7f3c2e9 -->
+VERDICT: APPROVE
+<!-- END-RAW-a7f3c2e9 -->
+""")
+    code, _ = run(iter_file, FIXTURES / "manifest_simple.json")
+    assert code == 1
