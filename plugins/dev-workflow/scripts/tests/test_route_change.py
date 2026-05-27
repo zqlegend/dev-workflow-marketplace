@@ -55,3 +55,7 @@ def test_empty_input_exits_2(tmp_path):
 def test_always_two_lines(tmp_path):
     r = route(["src/app.py"], cwd=tmp_path)
     assert len([l for l in r.stdout.strip().splitlines() if l.startswith("ROLE")]) == 2
+
+def test_type_only(tmp_path):
+    d = parse(route(["src/types.ts", "api/user.d.ts"], cwd=tmp_path))
+    assert d == {"ROLE1": "type-design-reviewer", "ROLE2": "process-auditor"}

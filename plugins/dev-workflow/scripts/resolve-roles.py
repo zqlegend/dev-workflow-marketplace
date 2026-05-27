@@ -59,7 +59,11 @@ def main():
     if len(sys.argv) != 2:
         sys.stderr.write("usage: resolve-roles.py <manifest.json>\n"); sys.exit(2)
     path = Path(sys.argv[1])
-    manifest = json.loads(path.read_text())
+    try:
+        manifest = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as e:
+        sys.stderr.write(f"resolve-roles: cannot read manifest {path}: {e}\n")
+        sys.exit(2)
     external_ok = use_external() and pr_toolkit_installed()
     for sl in manifest.get("slices", []):
         sl["roles"] = [resolve(r, external_ok) for r in sl.get("roles", [])]
