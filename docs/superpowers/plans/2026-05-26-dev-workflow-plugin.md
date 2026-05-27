@@ -247,6 +247,7 @@ SCHEMA=$(jq -r '.schema_version' "$REVIEW_DIR/manifest.json")
 # so a '&' or '\' in $CHECK can't corrupt the output as it would with awk/sed gsub)
 CHECK="$ROOT/scripts/check-approve.py"
 PROMPT_FILE=$(mktemp -t dev-loop-prompt.XXXXXX)
+trap 'rm -f "$PROMPT_FILE"' EXIT   # clean up even if ralph exits non-zero
 python3 - "$ROOT/skills/dev-workflow/review-loop-prompt.md" "$CHECK" "$REVIEW_DIR" > "$PROMPT_FILE" <<'PY'
 import sys
 src, chk, rdir = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -255,10 +256,9 @@ sys.stdout.write(open(src).read()
                  .replace("{{REVIEW_DIR}}", rdir))
 PY
 
-# (f) hand to ralph-loop
+# (f) hand to ralph-loop (PROMPT_FILE is removed by the EXIT trap)
 RALPH=$("$ROOT/scripts/find-ralph.sh")
 "$RALPH" "$(cat "$PROMPT_FILE")" --completion-promise "$PROMISE" --max-iterations "$MAXIT"
-rm -f "$PROMPT_FILE"
 echo "Ralph-loop initialized (mode: code-review). Begin iteration 1."
 ```
 
@@ -889,6 +889,7 @@ if [[ "$MODE" == "code" ]]; then
   TARGETS=("${CHANGED[@]}")
 elif [[ "$MODE" == "plan" ]]; then
   PLAN="${2:-doc/current_plan.md}"
+  [[ "$PLAN" == --* ]] && PLAN="doc/current_plan.md"   # don't mistake a flag for the path
   R1="structural-architect"; R2="process-auditor"
   TARGETS=("$PLAN")
 else
@@ -1074,7 +1075,8 @@ BASE="${BASE:-main}"; HEAD="${HEAD:-HEAD}"; CAP=30
 mapfile -t CHANGED < <(git diff --name-only "$BASE...$HEAD" 2>/dev/null | sort -u)
 [[ ${#CHANGED[@]} -eq 0 ]] && { echo "no changed files in $BASE...$HEAD" >&2; exit 2; }
 
-mapfile -t SEC < <(python3 "$HERE/read-config.py" review.security_sensitive_paths "" 2>/dev/null || true)
+# no default -> read-config exits 3 when absent; `|| true` swallows it so SEC stays empty
+mapfile -t SEC < <(python3 "$HERE/read-config.py" review.security_sensitive_paths 2>/dev/null || true)
 
 # classify files: emit "IFACE\t<f>" and/or "SEC\t<f>" (single source of glob logic)
 if [[ ${#SEC[@]} -gt 0 ]]; then SEC_STR=$(printf '%s\n' "${SEC[@]}"); else SEC_STR=""; fi
@@ -1264,7 +1266,7 @@ Reference file:line for every finding. Do not invent findings. You Read/Grep/Glo
 }
 ```
 
-- [ ] **Step 2: End-to-end manifest→resolve→token-render dry run.** In a throwaway git repo with a sample diff and a `use_external_agents: false` config, run `detect-review-type.sh code --force`, then `resolve-roles.py` on the manifest, then the driver's `awk` render step, and assert: manifest `schema_version==1`, roles are `dev-workflow:`-namespaced (fallback), the rendered prompt contains `.claude/dev-review` and `DEV-REVIEW-DONE` and no `{{...}}` tokens remain. (Does NOT start ralph — verifies wiring only.)
+- [ ] **Step 2: End-to-end manifest→resolve→token-render dry run.** In a throwaway git repo with a sample diff and a `use_external_agents: false` config, run `detect-review-type.sh code --force`, then `resolve-roles.py` on the manifest, then the driver's prompt-render step (the `python3` literal-replace renderer from WU1 Step 11), and assert: manifest `schema_version==1`, roles are `dev-workflow:`-namespaced (fallback), the rendered prompt contains `.claude/dev-review` and `DEV-REVIEW-DONE` and no `{{...}}` tokens remain. Run with `CLAUDE_PLUGIN_ROOT` unset (or pointing at the installed plugin); either way `use_external_agents:false` guarantees the `dev-workflow:` fallback. (Does NOT start ralph — verifies wiring only.)
 
 - [ ] **Step 3: Cross-plugin dispatch smoke test (gates `use_external_agents`).** From within Claude Code, dispatch one `pr-review-toolkit:code-reviewer` agent via the Agent tool on a trivial file and confirm it returns. If it resolves, document that `use_external_agents: true` is safe to enable; if not, leave the default `false` and record the finding. (This step is run interactively by the executing agent, not via pytest.)
 
